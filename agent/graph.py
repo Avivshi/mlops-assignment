@@ -21,7 +21,6 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-import httpx
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
@@ -37,27 +36,12 @@ MAX_ITERATIONS = 3
 DEFAULT_VLLM_BASE_URL = "http://localhost:8000/v1"
 DEFAULT_VLLM_MODEL = "Qwen/Qwen3-30B-A3B-Instruct-2507"
 
-if os.environ.get("VLLM_BASE_URL"):
-    VLLM_BASE_URL = os.environ["VLLM_BASE_URL"]
-    VLLM_MODEL = os.environ.get("VLLM_MODEL", DEFAULT_VLLM_MODEL)
-    LLM_API_KEY_ENV = os.environ.get("OPENAI_API_KEY") or os.environ.get("NEBIUS_API_KEY")
-elif os.environ.get("NEBIUS_BASE_URL"):
-    VLLM_BASE_URL = os.environ["NEBIUS_BASE_URL"]
-    VLLM_MODEL = os.environ.get("NEBIUS_MODEL") or os.environ.get("VLLM_MODEL", DEFAULT_VLLM_MODEL)
-    LLM_API_KEY_ENV = os.environ.get("NEBIUS_API_KEY") or os.environ.get("OPENAI_API_KEY")
-else:
-    VLLM_BASE_URL = DEFAULT_VLLM_BASE_URL
-    VLLM_MODEL = os.environ.get("VLLM_MODEL", DEFAULT_VLLM_MODEL)
-    LLM_API_KEY_ENV = os.environ.get("OPENAI_API_KEY") or os.environ.get("NEBIUS_API_KEY")
+VLLM_BASE_URL = os.environ.get("VLLM_BASE_URL", DEFAULT_VLLM_BASE_URL)
+VLLM_MODEL = os.environ.get("VLLM_MODEL", DEFAULT_VLLM_MODEL)
 
 # vLLM ignores the key, but a hosted OpenAI-compatible provider needs a real one.
 # Lets you point the agent at e.g. OpenAI while iterating without a running vLLM.
-LLM_API_KEY = LLM_API_KEY_ENV or "not-needed"
-LLM_SSL_VERIFY = os.environ.get("LLM_SSL_VERIFY", "true").lower() not in {
-    "0",
-    "false",
-    "no",
-}
+LLM_API_KEY = os.environ.get("OPENAI_API_KEY", "not-needed")
 
 
 class VerifyDecision(BaseModel):
@@ -82,16 +66,12 @@ class AgentState:
 
 def llm() -> ChatOpenAI:
     """Chat client pointed at VLLM_BASE_URL (your local vLLM by default)."""
-    kwargs = {
-        "model": VLLM_MODEL,
-        "base_url": VLLM_BASE_URL,
-        "api_key": LLM_API_KEY,
-        "temperature": 0.0,
-    }
-    if not LLM_SSL_VERIFY:
-        kwargs["http_client"] = httpx.Client(verify=False)
-    return ChatOpenAI(**kwargs)
-
+    return ChatOpenAI(
+        model=VLLM_MODEL,
+        base_url=VLLM_BASE_URL,
+        api_key=LLM_API_KEY,
+        temperature=0.0,
+    )
 
 # ---- Nodes ------------------------------------------------------------
 
@@ -134,12 +114,17 @@ def _message_text(content: Any) -> str:
 
 def _invoke_verifier(messages: list[tuple[str, str]]) -> VerifyDecision:
     """Call the verifier with schema-constrained JSON output."""
-    return llm().with_structured_output(
-        VerifyDecision,
-        method="json_schema",
-        strict=True,
-        max_tokens=128,
-    ).invoke(messages)
+    try:
+        return llm().with_structured_output(
+            VerifyDecision,
+            method="json_schema",
+            strict=True,
+        ).invoke(messages)
+    except Exception as e:  # noqa: BLE001
+        return VerifyDecision(
+            ok=False,
+            issue=f"Verifier failed to produce structured JSON: {type(e).__name__}: {e}",
+        )
 
 
 def _duplicate_row_issue(state: AgentState) -> str | None:
