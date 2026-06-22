@@ -26,6 +26,8 @@ from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
 
 from agent import prompts
+from openai import BadRequestError
+
 from agent.execution import ExecutionResult, execute_sql
 from agent.schema import render_schema, render_schema_for_sql
 
@@ -73,11 +75,36 @@ def llm() -> ChatOpenAI:
         temperature=0.0,
     )
 
+# ---- Helpers -----------------------------------------------------------
+
+# Rough chars-per-token estimate for budget calculations.
+_CHARS_PER_TOKEN = 4
+# Reserve tokens for system prompt, question, SQL, execution, and response.
+_SCHEMA_TOKEN_BUDGET = 12_000
+_SCHEMA_CHAR_BUDGET = _SCHEMA_TOKEN_BUDGET * _CHARS_PER_TOKEN
+
+
+def _truncate_schema(schema: str) -> str:
+    """Truncate schema to fit within token budget, keeping full tables."""
+    if len(schema) <= _SCHEMA_CHAR_BUDGET:
+        return schema
+    lines = schema.split("\n")
+    kept: list[str] = []
+    length = 0
+    for line in lines:
+        if length + len(line) + 1 > _SCHEMA_CHAR_BUDGET:
+            kept.append("\n-- ... (remaining tables truncated for context budget)")
+            break
+        kept.append(line)
+        length += len(line) + 1
+    return "\n".join(kept)
+
+
 # ---- Nodes ------------------------------------------------------------
 
 def _attach_schema(state: AgentState) -> dict:
     """Provided. Render the DB schema once at the start of the run."""
-    return {"schema": render_schema(state.db_id)}
+    return {"schema": _truncate_schema(render_schema(state.db_id))}
 
 
 def _extract_sql(text: str) -> str:
@@ -152,13 +179,25 @@ def generate_sql_node(state: AgentState) -> dict:
     This node is wired and ready; fill in GENERATE_SQL_SYSTEM / GENERATE_SQL_USER
     in prompts.py to make it produce real queries.
     """
-    response = llm().invoke([
-        ("system", prompts.GENERATE_SQL_SYSTEM),
-        ("user", prompts.GENERATE_SQL_USER.format(
-            schema=state.schema,
-            question=state.question,
-        )),
-    ])
+    try:
+        response = llm().invoke([
+            ("system", prompts.GENERATE_SQL_SYSTEM),
+            ("user", prompts.GENERATE_SQL_USER.format(
+                schema=state.schema,
+                question=state.question,
+            )),
+        ])
+    except BadRequestError:
+        return {
+            "sql": "SELECT 1;  -- context too long, skipped",
+            "iteration": state.iteration + 1,
+            "history": state.history + [{
+                "node": "generate_sql",
+                "iteration": state.iteration + 1,
+                "sql": "SELECT 1;  -- context too long",
+                "error": "context_overflow",
+            }],
+        }
     sql = _extract_sql(_message_text(response.content))
     return {
         "sql": sql,
@@ -236,17 +275,31 @@ def revise_node(state: AgentState) -> dict:
     execution_text = state.execution.render() if state.execution is not None else "No execution result."
     if len(execution_text) > 2000:
         execution_text = execution_text[:2000] + "\n... (truncated)"
-    pruned_schema = render_schema_for_sql(state.db_id, state.sql)
-    response = llm().invoke([
-        ("system", prompts.REVISE_SYSTEM),
-        ("user", prompts.REVISE_USER.format(
-            schema=pruned_schema,
-            question=state.question,
-            sql=state.sql,
-            execution=execution_text,
-            issue=state.verify_issue,
-        )),
-    ])
+    pruned_schema = _truncate_schema(render_schema_for_sql(state.db_id, state.sql))
+    try:
+        response = llm().invoke([
+            ("system", prompts.REVISE_SYSTEM),
+            ("user", prompts.REVISE_USER.format(
+                schema=pruned_schema,
+                question=state.question,
+                sql=state.sql,
+                execution=execution_text,
+                issue=state.verify_issue,
+            )),
+        ])
+    except BadRequestError:
+        return {
+            "sql": state.sql,
+            "iteration": MAX_ITERATIONS,
+            "verify_ok": False,
+            "verify_issue": "context_overflow_in_revise",
+            "history": state.history + [{
+                "node": "revise",
+                "iteration": state.iteration + 1,
+                "sql": state.sql,
+                "error": "context_overflow",
+            }],
+        }
     sql = _extract_sql(_message_text(response.content))
     return {
         "sql": sql,
