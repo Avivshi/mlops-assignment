@@ -16,4 +16,6 @@ exec uv run python -m vllm.entrypoints.openai.api_server \
     --enable-prefix-caching \
     --enable-chunked-prefill \
     --guided-decoding-backend xgrammar \
+    --num-scheduler-steps 8 \
+    --max-num-seqs 64 \
     --disable-log-requests
