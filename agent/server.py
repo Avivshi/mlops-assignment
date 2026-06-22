@@ -9,6 +9,7 @@ agent's final SQL, the result rows, and per-iteration history.
 from __future__ import annotations
 
 import os
+import traceback
 from typing import Any
 
 from dotenv import load_dotenv
@@ -62,6 +63,10 @@ def answer(req: AnswerRequest) -> AnswerResponse:
     try:
         final = graph.invoke(state, config=config)
     except Exception as e:  # noqa: BLE001
+        print("AGENT ERROR")
+        print(f"db={req.db}")
+        print(f"question={req.question!r}")
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
 
     sql = final.get("sql", "")
