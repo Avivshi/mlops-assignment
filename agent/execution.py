@@ -20,16 +20,39 @@ class ExecutionResult:
     error: str | None = None
     row_count: int = 0
 
-    def render(self, max_rows: int = 10) -> str:
+    def render(
+        self,
+        max_rows: int = 5,
+        max_cell_chars: int = 300,
+        max_preview_chars: int = 4000,
+    ) -> str:
         """Compact text rendering for prompt context."""
         if not self.ok:
             return f"ERROR: {self.error}"
         if self.row_count == 0:
             return "OK: 0 rows returned."
         cols = ", ".join(self.columns or [])
-        preview = "\n".join(
-            " | ".join(str(c) for c in row) for row in (self.rows or [])[:max_rows]
-        )
+
+        def fmt_cell(value) -> str:
+            text = "" if value is None else str(value)
+            text = text.replace("\n", "\\n")
+            if len(text) > max_cell_chars:
+                return text[:max_cell_chars] + "...[truncated]"
+            return text
+
+        preview_lines: list[str] = []
+        used_chars = 0
+        for row in (self.rows or [])[:max_rows]:
+            line = " | ".join(fmt_cell(c) for c in row)
+            if used_chars + len(line) > max_preview_chars:
+                remaining = max_preview_chars - used_chars
+                if remaining > 0:
+                    preview_lines.append(line[:remaining] + "...[preview truncated]")
+                break
+            preview_lines.append(line)
+            used_chars += len(line)
+
+        preview = "\n".join(preview_lines)
         more = f"\n... ({self.row_count - max_rows} more rows)" if self.row_count > max_rows else ""
         return f"OK: {self.row_count} rows.\nCOLUMNS: {cols}\nFIRST ROWS:\n{preview}{more}"
 
