@@ -64,6 +64,67 @@ def render_schema(db_id: str) -> str:
     return "\n".join(parts)
 
 
+def _extract_tables_from_sql(sql: str, known_tables: list[str]) -> list[str]:
+    """Extract table names referenced in SQL using known table list."""
+    import re
+    sql_upper = sql.upper()
+    found: list[str] = []
+    for table in known_tables:
+        pattern = re.compile(
+            r'\b' + re.escape(table) + r'\b',
+            re.IGNORECASE,
+        )
+        if pattern.search(sql):
+            found.append(table)
+    return found if found else known_tables
+
+
+def render_schema_for_sql(db_id: str, sql: str) -> str:
+    """Render schema containing only tables referenced in the SQL.
+
+    Falls back to full schema if no tables can be extracted.
+    """
+    path = db_path(db_id)
+    if not path.exists():
+        return render_schema(db_id)
+
+    with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
+        all_tables = [
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name NOT LIKE 'sqlite_%' "
+                "ORDER BY name"
+            )
+        ]
+
+    referenced = _extract_tables_from_sql(sql, all_tables)
+
+    parts: list[str] = [f"-- Database: {db_id} (tables relevant to query)"]
+    with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
+        for t in referenced:
+            parts.append(f"\nCREATE TABLE {_q(t)} (")
+            col_lines: list[str] = []
+            for _cid, name, ctype, notnull, _dflt, pk in conn.execute(f"PRAGMA table_info({_q(t)})"):
+                line = f"  {_q(name)} {ctype}"
+                if pk:
+                    line += " PRIMARY KEY"
+                if notnull and not pk:
+                    line += " NOT NULL"
+                col_lines.append(line)
+            for fk in conn.execute(f"PRAGMA foreign_key_list({_q(t)})"):
+                ref_table, from_col, to_col = fk[2], fk[3], fk[4]
+                if ref_table is None or from_col is None:
+                    continue
+                ref = f"REFERENCES {_q(ref_table)}"
+                if to_col is not None:
+                    ref += f"({_q(to_col)})"
+                col_lines.append(f"  FOREIGN KEY ({_q(from_col)}) {ref}")
+            parts.append(",\n".join(col_lines))
+            parts.append(");")
+    return "\n".join(parts)
+
+
 def available_dbs() -> list[str]:
     if not DB_DIR.exists():
         return []

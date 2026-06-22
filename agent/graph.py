@@ -27,7 +27,7 @@ from pydantic import BaseModel, Field
 
 from agent import prompts
 from agent.execution import ExecutionResult, execute_sql
-from agent.schema import render_schema
+from agent.schema import render_schema, render_schema_for_sql
 
 # Total generate + revise calls before the loop is forced to stop.
 # 3-5 is a reasonable range; tune it as part of Phase 3.
@@ -234,10 +234,13 @@ def revise_node(state: AgentState) -> dict:
     Return: {"sql": <str>, "iteration": state.iteration + 1, ...}.
     """
     execution_text = state.execution.render() if state.execution is not None else "No execution result."
+    if len(execution_text) > 2000:
+        execution_text = execution_text[:2000] + "\n... (truncated)"
+    pruned_schema = render_schema_for_sql(state.db_id, state.sql)
     response = llm().invoke([
         ("system", prompts.REVISE_SYSTEM),
         ("user", prompts.REVISE_USER.format(
-            schema=state.schema,
+            schema=pruned_schema,
             question=state.question,
             sql=state.sql,
             execution=execution_text,
