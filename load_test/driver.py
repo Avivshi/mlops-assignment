@@ -39,10 +39,10 @@ async def fire_one(
     err: str | None = None
     try:
         async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=120)) as resp:
-            await resp.read()
+            body = await resp.text()
             if resp.status != 200:
                 status = "http_error"
-                err = f"HTTP {resp.status}"
+                err = f"HTTP {resp.status}: {body}"
     except asyncio.TimeoutError:
         status = "timeout"
     except Exception as e:  # noqa: BLE001
@@ -52,6 +52,8 @@ async def fire_one(
         "latency_seconds": time.monotonic() - t0,
         "status": status,
         "error": err,
+        "db_id": question["db_id"],
+        "question": question["question"],
     })
 
 
